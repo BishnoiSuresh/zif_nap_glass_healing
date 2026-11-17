@@ -1,0 +1,15 @@
+#!/bin/bash
+#PBS -N zifnap
+#PBS -l select=1:ncpus=4:ngpus=1
+#PBS -l walltime=48:00:00
+#PBS -j oe
+##PBS -P <your_project>        # add your project / queue lines here
+##PBS -q <queue>
+# -----------------------------------------------------------------------------
+# PBS wrapper for run/run_step.sh. Submit from your RUN directory, e.g.
+#   qsub -N heal800_1 -v REPO=/path/to/repo,STEP=heal,THEAL=800,SEED=1 /path/to/repo/run/pbs_job.pbs
+# All step variables (STEP, POT, MODE, THEAL, SEED, THOLD, PHEAL, HDIR, ITEMS, ...) are passed with -v.
+# -----------------------------------------------------------------------------
+[ -n "$REPO" ] || { echo "pass REPO=/path/to/repo with -v"; exit 2; }
+cd ${PBS_O_WORKDIR}
+bash $REPO/run/run_step.sh

@@ -1,0 +1,132 @@
+# =====================================================================
+# in.heal_r1 -- healing of an INTERFACIAL crack (crack normal = z = layer normal).
+# CAX default z; THOLD ps at THEAL (optional TBR: also write the hot state after TBR ps of the
+# hold, hot_t<TBR>ps_<TAG>.data; off by default); dumps every
+# DUMPN steps of instantaneous (movie) and 1-ps time-averaged positions (IBD(t)).
+# ---------------------------------------------------------------------
+# (original header follows)
+# in.heal -- crack healing of the composite glass.
+# Input: cracked.data from make_crack.py (gap along CAX, default x).
+#   1) min + 300 K, crack held open (CAX length fixed, other axes 0 bar)  -> cracked_300K.data
+#   2) heat 300 -> THEAL at HEATRATE, crack still held open
+#   3) heal at THEAL: CAX barostat at PHEAL (closes the crack), others 0 bar, THOLD ps
+#   4) quench THEAL -> 300 K at RATE (aniso 0 bar), anneal, NVT sampling, box/relax -> healed.data
+# Run the SAME input on the uncracked composite (DATAFILE=composite_glass.data, TAG=control)
+# to separate healing from the effect of the heat treatment itself.
+# =====================================================================
+variable DATAFILE index cracked.data
+variable TAG      index healed
+variable ELEMENTS index "C H N Na O P Zn"
+variable MODEL    index model-mliap_lammps.pt
+variable TESTPOT  index 0
+variable D3       index 1
+variable D3FUNC   index r2scan
+variable CAX      index z        # crack-normal axis (round 1: z, crack along the interface)
+variable THEAL    index 800      # K   (above sim Tg of NaP ~670 K; ZIF linkers stable)
+variable PHEAL    index 1000     # bar along CAX during healing (0.1 GPa contact pressure)
+variable HEATRATE index 20       # K/ps
+variable THOLD    index 100      # ps at THEAL
+variable TBR      index 0        # ps: optionally write hot_t${TBR}ps_${TAG}.data during the hold (0 = none)
+variable DUMPN    index 1000     # steps between dumps during heating/holding (1 ps at dt 1 fs)
+variable RATE     index 20       # K/ps
+variable TANNEAL  index 10
+variable TSAMPLE  index 5
+variable DT       index 0.001
+variable SEED     index 777
+
+units           metal
+boundary        p p p
+atom_style      atomic
+atom_modify     map yes
+read_data       ${DATAFILE}
+if "${TESTPOT} == 1" then &
+  "pair_style soft 2.0" &
+  "pair_coeff * * 5.0" &
+elif "${D3} == 1" &
+  "pair_style hybrid/overlay mliap unified ${MODEL} 0 d3 9000 1600 damp_bj ${D3FUNC}" &
+  "pair_coeff * * mliap ${ELEMENTS}" &
+  "pair_coeff * * d3 ${ELEMENTS}" &
+else &
+  "pair_style mliap unified ${MODEL} 0" &
+  "pair_coeff * * ${ELEMENTS}"
+neigh_modify    one 3000
+timestep        ${DT}
+variable tdamp  equal 0.1
+variable pdamp  equal 1.0
+thermo          500
+thermo_style    custom step temp pe press pxx pyy pzz vol density lx ly lz
+variable vpe   equal pe
+variable vdens equal density
+variable vlx   equal lx
+variable vly   equal ly
+variable vlz   equal lz
+
+# barostat strings: crack held open (CAX not barostatted) / healing (CAX at PHEAL)
+if "${CAX} == x" then &
+  "variable OPEN string 'y 0 0 ${pdamp} z 0 0 ${pdamp} couple none'" &
+  "variable HEAL string 'x ${PHEAL} ${PHEAL} ${pdamp} y 0 0 ${pdamp} z 0 0 ${pdamp} couple none'" &
+elif "${CAX} == y" &
+  "variable OPEN string 'x 0 0 ${pdamp} z 0 0 ${pdamp} couple none'" &
+  "variable HEAL string 'x 0 0 ${pdamp} y ${PHEAL} ${PHEAL} ${pdamp} z 0 0 ${pdamp} couple none'" &
+else &
+  "variable OPEN string 'x 0 0 ${pdamp} y 0 0 ${pdamp} couple none'" &
+  "variable HEAL string 'x 0 0 ${pdamp} y 0 0 ${pdamp} z ${PHEAL} ${PHEAL} ${pdamp} couple none'"
+
+min_style       cg
+minimize        1.0e-6 1.0e-6 500 5000
+reset_timestep  0
+fix             flog all ave/time 50 20 1000 c_thermo_temp c_thermo_press v_vpe v_vdens v_vlx v_vly v_vlz file heal_curve_${TAG}.dat
+dump            traj all custom ${DUMPN} heal_${TAG}.lammpstrj id type element x y z
+dump_modify     traj sort id element ${ELEMENTS}
+# 1-ps time-averaged unwrapped positions for IBD(t) (removes thermal bond stretching at T_heal)
+compute         uw all property/atom xu yu zu
+variable        nave equal ${DUMPN}/10
+fix             avx all ave/atom 10 ${nave} ${DUMPN} c_uw[1] c_uw[2] c_uw[3]
+dump            tavg all custom ${DUMPN} heal_avg_${TAG}.lammpstrj id type element f_avx[1] f_avx[2] f_avx[3]
+dump_modify     tavg sort id element ${ELEMENTS}
+fix             mom all momentum 1000 linear 1 1 1
+velocity        all create 300 ${SEED} rot yes dist gaussian
+
+# 1) cracked state at 300 K
+fix             s1 all npt temp 300 300 ${tdamp} ${OPEN}
+run             $(ceil(5/v_DT))
+unfix           s1
+write_data      start_300K_${TAG}.data nocoeff
+# 2) heat with the crack held open
+fix             s2 all npt temp 300 ${THEAL} ${tdamp} ${OPEN}
+run             $(ceil((v_THEAL-300)/v_HEATRATE/v_DT))
+unfix           s2
+# 3) heal: contact pressure across the crack
+fix             s3 all npt temp ${THEAL} ${THEAL} ${tdamp} ${HEAL}
+if "${TBR} > 0 && ${TBR} < ${THOLD}" then &
+  "run $(ceil(v_TBR/v_DT))" &
+  "write_data hot_t${TBR}ps_${TAG}.data nocoeff" &
+  "run $(ceil((v_THOLD-v_TBR)/v_DT))" &
+else &
+  "run $(ceil(v_THOLD/v_DT))"
+unfix           s3
+undump          tavg
+unfix           avx
+write_data      hot_${THEAL}K_${TAG}.data nocoeff
+# 4) quench (instantaneous dump every 5 ps from here), anneal, sample, relax
+dump_modify     traj every 5000
+fix             s4 all npt temp ${THEAL} 300 ${tdamp} aniso 0 0 ${pdamp}
+run             $(ceil((v_THEAL-300)/v_RATE/v_DT))
+unfix           s4
+fix             s5 all npt temp 300 300 ${tdamp} aniso 0 0 ${pdamp}
+run             $(ceil(v_TANNEAL/v_DT))
+unfix           s5
+undump          traj
+dump            stats all custom $(ceil(v_TSAMPLE/v_DT/10)) md_stats_${TAG}.lammpstrj id type element x y z
+dump_modify     stats sort id element ${ELEMENTS}
+fix             s6 all nvt temp 300 300 ${tdamp}
+run             $(ceil(v_TSAMPLE/v_DT))
+unfix           s6
+undump          stats
+unfix           flog
+fix             br all box/relax aniso 0.0
+minimize        1.0e-8 1.0e-8 2000 20000
+unfix           br
+write_data      ${TAG}.data nocoeff
+write_dump      all xyz ${TAG}.xyz modify element ${ELEMENTS}
+print "RESULT ${TAG} THEAL=${THEAL} PHEAL=${PHEAL} rho300=$(density) lx=$(lx) ly=$(ly) lz=$(lz) PE/atom=$(pe/atoms)"

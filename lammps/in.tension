@@ -1,0 +1,58 @@
+# =====================================================================
+# in.tension -- (optional) uniaxial tension normal to the healed interface
+# at 300 K.  Lateral axes at 0 bar (NPT x y), z stretched at ERATE (1/ps) up to EMAX.
+# Output: stress_strain_<TAG>.dat (engineering strain, sigma_zz GPa, sigma_xx, sigma_yy, T)
+#         tension_<TAG>.lammpstrj (every 5 ps, for the fracture path)
+# Compare pristine vs healed: strength = max sigma_zz; where the sample breaks (I1 or not).
+# =====================================================================
+variable DATAFILE index healed.data
+variable TAG      index healed
+variable ELEMENTS index "C H N Na O P Zn"
+variable MODEL    index model-mliap_lammps.pt
+variable TESTPOT  index 0
+variable D3       index 1
+variable D3FUNC   index r2scan
+variable ERATE    index 0.001    # 1/ps = 1e9 1/s
+variable EMAX     index 0.15
+variable DT       index 0.001
+variable SEED     index 2024
+
+units           metal
+boundary        p p p
+atom_style      atomic
+atom_modify     map yes
+read_data       ${DATAFILE}
+if "${TESTPOT} == 1" then &
+  "pair_style soft 2.0" &
+  "pair_coeff * * 5.0" &
+elif "${D3} == 1" &
+  "pair_style hybrid/overlay mliap unified ${MODEL} 0 d3 9000 1600 damp_bj ${D3FUNC}" &
+  "pair_coeff * * mliap ${ELEMENTS}" &
+  "pair_coeff * * d3 ${ELEMENTS}" &
+else &
+  "pair_style mliap unified ${MODEL} 0" &
+  "pair_coeff * * ${ELEMENTS}"
+neigh_modify    one 3000
+timestep        ${DT}
+variable tdamp  equal 0.1
+variable pdamp  equal 1.0
+thermo          1000
+thermo_style    custom step temp pe press pxx pyy pzz lx ly lz
+velocity        all create 300 ${SEED} rot yes dist gaussian
+fix             eq all npt temp 300 300 ${tdamp} aniso 0 0 ${pdamp}
+run             $(ceil(10/v_DT))
+unfix           eq
+variable L0     equal $(lz)
+variable strain equal (lz-v_L0)/v_L0
+variable szz    equal -pzz/10000
+variable sxx    equal -pxx/10000
+variable syy    equal -pyy/10000
+reset_timestep  0
+fix             lat all npt temp 300 300 ${tdamp} x 0 0 ${pdamp} y 0 0 ${pdamp} couple none
+fix             pull all deform 1 z erate ${ERATE} remap x
+fix             out all ave/time 10 50 500 v_strain v_szz v_sxx v_syy c_thermo_temp file stress_strain_${TAG}.dat
+dump            traj all custom 5000 tension_${TAG}.lammpstrj id type element x y z
+dump_modify     traj sort id element ${ELEMENTS}
+run             $(ceil(v_EMAX/v_ERATE/v_DT))
+write_data      tension_end_${TAG}.data nocoeff
+print "RESULT tension ${TAG} ERATE=${ERATE} EMAX=${EMAX} L0=${L0}"

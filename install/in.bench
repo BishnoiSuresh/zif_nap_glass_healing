@@ -1,0 +1,50 @@
+# =====================================================================
+# Speed + energy-conservation benchmark for MACE ML-IAP (KOKKOS GPU)
+#   lmp -k on g 1 -sf kk -pk kokkos newton on neigh half -in in.bench \
+#       -var DATA bench_3344atoms.data -var MODEL model-mliap_lammps.pt \
+#       -var ELEMS "C H N Na O P Zn" -var DT 0.001 -var D3 0
+# Reports: "Performance:" lines (NVT block) and NVE drift (eV/atom) in nve_drift.dat
+# =====================================================================
+variable DATA  index bench.data
+variable MODEL index model-mliap_lammps.pt
+variable ELEMS index "C H N Na O P Zn"
+variable DT    index 0.001          # ps (1 fs). Use 0.0005 if drift is large (H atoms)
+variable D3    index 0              # 1 -> add GPU-D3(BJ, r2scan)
+variable T     index 600
+variable NSTEP index 2000
+
+units           metal
+atom_style      atomic
+atom_modify     map yes
+newton          on
+boundary        p p p
+read_data       ${DATA}
+
+if "${D3} == 1" then &
+  "pair_style hybrid/overlay mliap unified ${MODEL} 0 d3 9000 1600 damp_bj r2scan" &
+  "pair_coeff * * mliap ${ELEMS}" &
+  "pair_coeff * * d3 ${ELEMS}" &
+else &
+  "pair_style mliap unified ${MODEL} 0" &
+  "pair_coeff * * ${ELEMS}"
+
+neigh_modify    one 3000
+timestep        ${DT}
+thermo          100
+thermo_style    custom step time temp pe etotal press density
+
+velocity        all create ${T} 4928459 mom yes rot yes dist gaussian
+
+# warm-up (excluded from timing: JIT / cuEq kernel compilation)
+fix             th all nvt temp ${T} ${T} 0.1
+run             200
+
+# timed NVT block
+run             ${NSTEP}
+unfix           th
+
+# NVE energy conservation
+variable        et equal etotal/atoms
+fix             drift all print 50 "$(step) $(time) ${et} $(temp)" file nve_drift.dat screen no
+fix             nve all nve
+run             ${NSTEP}

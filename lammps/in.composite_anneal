@@ -1,0 +1,99 @@
+# =====================================================================
+# in.composite_anneal -- composite glass from a freshly built
+# NaP|ZIF|NaP stack (build_composite.py): relax the two interfaces by an
+# NPT anneal above the NaP Tg but far below ZIF linker decomposition,
+# then quench.  (Full 1500 K composite melt = in.melt_zif, later rounds.)
+#   min -> 300 K NVT -> NPT ramp to TANN -> NPT hold -> NPT quench -> 300 K anneal
+#   -> NVT sampling (md_stats.lammpstrj for S(Q)) -> box/relax -> composite_glass.data
+# =====================================================================
+variable DATAFILE index start.data
+variable ELEMENTS index "C H N Na O P Zn"
+variable MODEL    index model-mliap_lammps.pt
+variable TESTPOT  index 0
+variable D3       index 1
+variable D3FUNC   index r2scan
+variable TANN     index 900      # K   (sim Tg: NaP ~670 K, ZIF >900 K; linkers intact up to 1500 K)
+variable HEATRATE index 20       # K/ps
+variable THOLD    index 40       # ps at TANN
+variable RATE     index 20       # K/ps quench
+variable TANNEAL  index 10       # ps at 300 K
+variable TSAMPLE  index 5        # ps NVT sampling
+variable BARO     index aniso
+variable PANN     index 0        # bar during heating + hold (+ quench if PQHOLD=1)
+variable PQHOLD   index 0        # 1 = quench at PANN, release to 0 bar at 300 K over TPREL
+variable TPREL    index 20       # ps
+variable DT       index 0.001
+variable SEED     index 4928456
+
+units           metal
+boundary        p p p
+atom_style      atomic
+atom_modify     map yes
+read_data       ${DATAFILE}
+if "${TESTPOT} == 1" then &
+  "pair_style soft 2.0" &
+  "pair_coeff * * 5.0" &
+elif "${D3} == 1" &
+  "pair_style hybrid/overlay mliap unified ${MODEL} 0 d3 9000 1600 damp_bj ${D3FUNC}" &
+  "pair_coeff * * mliap ${ELEMENTS}" &
+  "pair_coeff * * d3 ${ELEMENTS}" &
+else &
+  "pair_style mliap unified ${MODEL} 0" &
+  "pair_coeff * * ${ELEMENTS}"
+neigh_modify    one 3000
+timestep        ${DT}
+variable tdamp  equal 0.1
+variable pdamp  equal 1.0
+thermo          500
+thermo_style    custom step temp pe press pxx pyy pzz vol density lx ly lz
+variable vpe   equal pe
+variable vvol  equal vol
+variable vdens equal density
+
+min_style       cg
+minimize        1.0e-6 1.0e-6 500 5000
+write_dump      all xyz start_min.xyz modify element ${ELEMENTS}
+reset_timestep  0
+fix             flog all ave/time 50 20 1000 c_thermo_temp c_thermo_press v_vpe v_vvol v_vdens file anneal_curve.dat
+dump            traj all custom 5000 anneal.lammpstrj id type element x y z
+dump_modify     traj sort id element ${ELEMENTS}
+fix             mom all momentum 1000 linear 1 1 1
+
+velocity        all create 300 ${SEED} rot yes dist gaussian
+fix             eq all nvt temp 300 300 ${tdamp}
+run             $(ceil(5/v_DT))
+unfix           eq
+fix             up all npt temp 300 ${TANN} ${tdamp} ${BARO} 0 ${PANN} ${pdamp}
+run             $(ceil((v_TANN-300)/v_HEATRATE/v_DT))
+unfix           up
+fix             hold all npt temp ${TANN} ${TANN} ${tdamp} ${BARO} ${PANN} ${PANN} ${pdamp}
+run             $(ceil(v_THOLD/v_DT))
+unfix           hold
+write_data      composite_${TANN}K.data nocoeff
+if "${PQHOLD} == 1" then "variable PC equal ${PANN}" else "variable PC equal 0"
+fix             cool all npt temp ${TANN} 300 ${tdamp} ${BARO} ${PANN} ${PC} ${pdamp}
+run             $(ceil((v_TANN-300)/v_RATE/v_DT))
+unfix           cool
+if "${PQHOLD} == 1" then &
+  "print '### quenched at ${PANN} bar: rho(300 K) = $(density) g/cm^3 -> release over ${TPREL} ps'" &
+  "write_data composite_300K_${PANN}bar.data nocoeff" &
+  "fix rel all npt temp 300 300 ${tdamp} ${BARO} ${PANN} 0 ${pdamp}" &
+  "run $(ceil(v_TPREL/v_DT))" &
+  "unfix rel"
+fix             ann all npt temp 300 300 ${tdamp} ${BARO} 0 0 ${pdamp}
+run             $(ceil(v_TANNEAL/v_DT))
+unfix           ann
+undump          traj
+dump            stats all custom $(ceil(v_TSAMPLE/v_DT/10)) md_stats.lammpstrj id type element x y z
+dump_modify     stats sort id element ${ELEMENTS}
+fix             smp all nvt temp 300 300 ${tdamp}
+run             $(ceil(v_TSAMPLE/v_DT))
+unfix           smp
+undump          stats
+unfix           flog
+fix             br all box/relax aniso 0.0
+minimize        1.0e-8 1.0e-8 2000 20000
+unfix           br
+write_data      composite_glass.data nocoeff
+write_dump      all xyz composite_glass.xyz modify element ${ELEMENTS}
+print "RESULT composite TANN=${TANN} PANN=${PANN} PQHOLD=${PQHOLD} rho300=$(density) lx=$(lx) ly=$(ly) lz=$(lz) PE/atom=$(pe/atoms)"

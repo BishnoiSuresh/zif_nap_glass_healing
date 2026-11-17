@@ -1,0 +1,279 @@
+# =====================================================================
+# in.melt_zif  --  ZIF-specific melt + GlassDB-style quench
+#
+# Why: the GlassDB criterion (every element >= 6 A^2 / 10 ps) is reached by an
+# oxide liquid, but a ZIF liquid is ~1e5 Pa s at Tm and the linkers decompose
+# above ~1700 K (Du et al., DPMD of ZIF-4). In our MH-1 runs at 1500 K the
+# slowest species was Zn (0.8-3.6 A^2 / 10 ps), so the criterion could never
+# be met without destroying the linkers.
+#
+# Melting is instead judged from the Zn-N network (Gaillac et al. Nat. Mater.
+# 2017; Du et al. Natl. Sci. Rev. 2024):
+#   fixed THOT (default 1500 K, below linker decomposition),
+#   NVT at the crystal volume (as in Gaillac's FPMD; avoids 0-bar cavitation),
+#   hold in TBLOCK blocks until
+#      >= FEXCH of the original Zn-N bonds are broken  AND
+#      Zn MSD  >= ZNMSD A^2                            AND  t >= TMIXMIN,
+#   abort if more than LOSTMAX linkers decompose (zif_melt_check.py).
+# Pressure release (RELMODE):
+#   1 (default) NPT cooling THOT -> TREL (1300 K) with P ramped P0 -> PEND, so the
+#     superheated liquid never sits at 0 bar (that cavitated seed2 to 1.0 g/cc);
+#     20 ps hold at TREL, then the usual 5 K/ps NPT quench.
+#   0 GlassDB: release at THOT at PRELRATE, 20 ps hold at THOT, quench.
+# Anneal, sampling and box/relax are identical to in.quench_zifnap / GlassDB v5.
+#
+#   lmp ... -in in.melt_zif -var DATAFILE zif62.data -var ELEMENTS "C H N Zn" \
+#       -var MODEL ... -var ZCHECK /path/scripts/zif_melt_check.py
+# =====================================================================
+
+variable DATAFILE index start.data
+variable ELEMENTS index "C H N Zn"
+variable MODEL    index model-mliap_lammps.pt
+variable ZCHECK   index zif_melt_check.py
+variable TESTPOT  index 0
+variable D3       index 0
+variable D3FUNC   index r2scan
+variable RATE     index 5
+variable T0       index 300
+variable THOT     index 1500     # fixed melt temperature (linkers decompose > ~1700 K)
+variable HEATRATE index 10       # K/ps ramp T0 -> THOT
+variable MELTNPT  index 0        # 0 = NVT at crystal volume, 1 = NPT at PMELT bar
+variable PMELT    index 0.0
+variable TBLOCK   index 10       # ps between melt checks
+variable TMIXMIN  index 50       # ps minimum hold at THOT
+variable TMIXMAX  index 300      # ps maximum hold (then warn + continue)
+variable FEXCH    index 0.5      # fraction of original Zn-N bonds broken
+variable ZNMSD    index 10       # A^2, Zn MSD since the start (~ half a Zn-Zn distance squared)
+variable LOSTMAX  index 1        # abort if more linkers than this are lost in 2 consecutive checks (use ~4 for 2x2x2 cells)
+variable RELMODE  index 1        # 1 = release while cooling THOT->TREL (default for ZIF); 0 = at THOT (GlassDB)
+variable TREL     index 1300     # K, end of release ramp; Zn-N network still rearranging here
+variable PRELRATE index 1000
+variable TRELMIN  index 5
+variable THOLD    index 20
+variable PEND     index 0.0
+variable FRACMIN  index 0.5
+variable BARO     index iso
+variable BRELAX   index aniso    # final box/relax: aniso, or z to keep a fixed lateral box
+variable DT       index 0.001
+variable SEED     index 4928456
+variable TFINAL   index 300.0
+variable TANNEAL  index 20
+variable PQHOLD   index 0        # 1 = keep PEND (bar) during the whole quench, release to 0 at TFINAL
+variable TPREL    index 20       # ps, pressure release at TFINAL when PQHOLD=1
+variable TSAMPLE  index 10
+variable SPLIT    index 0        # 1 = stop after liquid_0bar.restart (2-job chain for >48 h runs)
+
+units           metal
+dimension       3
+boundary        p p p
+atom_style      atomic
+atom_modify     map yes
+read_data       ${DATAFILE}
+
+if "${TESTPOT} == 1" then &
+  "pair_style soft 2.0" &
+  "pair_coeff * * 5.0" &
+elif "${D3} == 1" &
+  "pair_style hybrid/overlay mliap unified ${MODEL} 0 d3 9000 1600 damp_bj ${D3FUNC}" &
+  "pair_coeff * * mliap ${ELEMENTS}" &
+  "pair_coeff * * d3 ${ELEMENTS}" &
+else &
+  "pair_style mliap unified ${MODEL} 0" &
+  "pair_coeff * * ${ELEMENTS}"
+
+neigh_modify    one 3000
+timestep        ${DT}
+variable tdamp  equal 0.2
+variable pdamp  equal 2.0
+thermo          1000
+thermo_style    custom step temp pe etotal press vol density lx ly lz
+
+print """### ZIF MELT (network criterion) + GlassDB quench -- parameter echo
+### DATAFILE=${DATAFILE}  ELEMENTS=${ELEMENTS}  MODEL=${MODEL}  D3=${D3}
+### THOT=${THOT} K  HEATRATE=${HEATRATE} K/ps  MELTNPT=${MELTNPT} (PMELT=${PMELT} bar)
+### TBLOCK=${TBLOCK}  TMIXMIN=${TMIXMIN}  TMIXMAX=${TMIXMAX} ps  FEXCH=${FEXCH}  ZNMSD=${ZNMSD} A^2  LOSTMAX=${LOSTMAX}
+### RELMODE=${RELMODE} TREL=${TREL}  PRELRATE=${PRELRATE}  THOLD=${THOLD}  PEND=${PEND}  RATE=${RATE} K/ps  BARO=${BARO}  DT=${DT}  SEED=${SEED}"""
+
+variable vpe   equal pe
+variable vvol  equal vol
+variable vdens equal density
+
+# =====================================================================
+# Stage 0: relax; reference Zn-N network and linkers
+# =====================================================================
+min_style       cg
+minimize        1.0e-6 1.0e-6 10 10
+write_dump      all xyz start_min.xyz modify element ${ELEMENTS}
+write_dump      all custom zref.dump id type xu yu zu modify sort id
+velocity        all create ${T0} ${SEED} rot yes dist gaussian
+fix             mom all momentum 1000 linear 1 1 1
+
+# =====================================================================
+# Stage 1: NVT ramp T0 -> THOT
+# =====================================================================
+variable nheat equal ceil((${THOT}-${T0})/(${HEATRATE}*${DT}))
+fix             heat all nvt temp ${T0} ${THOT} ${tdamp}
+run             ${nheat}
+unfix           heat
+
+# =====================================================================
+# Stage 2: hold at THOT until the Zn-N network has rearranged
+# =====================================================================
+variable nblk  equal 10*ceil(${TBLOCK}/(${DT}*10))
+variable navgm equal floor(${nblk}/20)
+variable capped equal 0
+reset_timestep  0
+fix             fP0 all ave/time 10 ${navgm} ${nblk} c_thermo_press
+if "${MELTNPT} == 1" then &
+  "fix melt all npt temp ${THOT} ${THOT} ${tdamp} ${BARO} ${PMELT} ${PMELT} ${pdamp}" &
+else &
+  "fix melt all nvt temp ${THOT} ${THOT} ${tdamp}"
+
+variable tmixed equal 0
+variable zlostprev equal 0
+label mix_loop
+run             ${nblk}
+variable tmixed equal ${tmixed}+${TBLOCK}
+write_dump      all custom zcur.dump id type xu yu zu modify sort id
+shell           python ${ZCHECK} --ref zref.dump --cur zcur.dump --elements ${ELEMENTS} --out zcheck.lmp >> zcheck.log
+include         zcheck.lmp
+print           "### MELT t=${tmixed} ps: Zn-N broken ${zfexch} (need ${FEXCH}) | Zn new partner ${zznnew} | Zn CN4 ${zzncn4} | MSD Zn ${zmsdZn} (need ${ZNMSD}) linker ${zmsdLk} | Im ${zim} bIm ${zbim} broken ${zbroken} lost ${zlost}"
+# abort only if the linker loss persists over two consecutive checks (single-snapshot
+# losses at 1500 K are thermal bond stretching beyond the hot cutoffs, not decomposition)
+if "${zlost} > ${LOSTMAX} && ${zlostprev} > ${LOSTMAX}" then &
+  "write_dump all xyz decomposed_${tmixed}ps.xyz modify element ${ELEMENTS}" &
+  "print 'ERROR: ${zlost} linkers lost in two consecutive checks at ${THOT} K -- lower THOT'" &
+  "quit 1"
+variable zlostprev equal ${zlost}
+if "${zfexch} >= ${FEXCH} && ${zmsdZn} >= ${ZNMSD} && ${tmixed} >= ${TMIXMIN}" then "jump SELF mix_done"
+if "${tmixed} >= ${TMIXMAX}" then &
+  "variable capped equal 1" &
+  "print '### WARNING: network criterion not met after ${TMIXMAX} ps at ${THOT} K -- continuing'" &
+  "jump SELF mix_done"
+jump SELF mix_loop
+
+label mix_done
+unfix           melt
+variable P0     equal $(f_fP0)
+unfix           fP0
+print           "### Melted for ${tmixed} ps at ${THOT} K (capped=${capped});  <P>(THOT) = ${P0} bar"
+write_data      melt_${THOT}K.dat
+write_dump      all xyz melt_${THOT}K.xyz modify element ${ELEMENTS}
+write_restart   melt.restart
+
+# =====================================================================
+# Stage 3: rate-standardised decompression at THOT, with watchdog
+# =====================================================================
+variable rho0   equal $(density)
+variable rhomin equal ${FRACMIN}*${rho0}
+print           "### Pressure release ${P0} -> ${PEND} bar (RELMODE=${RELMODE}); watchdog floor rho = ${rhomin} g/cm^3"
+
+reset_timestep  0
+fix             flog all ave/time 50 40 2000 c_thermo_temp c_thermo_press v_vpe v_vvol v_vdens file cooling_curve.dat
+fix             wd   all halt 200 v_vdens < ${rhomin} error hard message yes
+dump            traj all custom 10000 quench.lammpstrj id type element x y z
+dump_modify     traj sort id element ${ELEMENTS}
+
+if "${RELMODE} == 1" then "jump SELF rel_on_cooling"
+
+# ---- RELMODE 0 (GlassDB): release at THOT, hold at PEND, then quench ----
+variable nrel    equal ceil(abs(${P0}-${PEND})/(${PRELRATE}*${DT}))
+variable nrelmin equal ceil(${TRELMIN}/${DT})
+if "${nrel} < ${nrelmin}" then "variable nrel equal ${nrelmin}"
+fix             rel all npt temp ${THOT} ${THOT} ${tdamp} ${BARO} ${P0} ${PEND} ${pdamp}
+run             ${nrel}
+unfix           rel
+variable nhold equal ceil(${THOLD}/${DT})
+fix             hold all npt temp ${THOT} ${THOT} ${tdamp} ${BARO} ${PEND} ${PEND} ${pdamp}
+run             ${nhold}
+unfix           hold
+variable rholiq equal $(density)
+print           "### Liquid at THOT=${THOT} K, ${PEND} bar: rho ~ ${rholiq} g/cm^3"
+write_restart   liquid_0bar.restart
+variable TSTART equal ${THOT}
+jump SELF stage4
+
+# ---- RELMODE 1: release while cooling ----
+# NPT from THOT to TREL with the pressure ramped linearly P0 -> PEND (no fixed
+# volume, no 0-bar exposure of the superheated liquid), short NPT hold at TREL
+# and PEND while the network is still mobile, then quench at PEND -> 0 bar.
+label rel_on_cooling
+print           "### Release-on-cooling: ${THOT} K, ${P0} bar -> ${TREL} K, ${PEND} bar at ${RATE} K/ps"
+variable nc1 equal ceil((${THOT}-${TREL})/(${RATE}*${DT}))
+fix             rel all npt temp ${THOT} ${TREL} ${tdamp} ${BARO} ${P0} ${PEND} ${pdamp}
+run             ${nc1}
+unfix           rel
+variable nhold equal ceil(${THOLD}/${DT})
+fix             hold all npt temp ${TREL} ${TREL} ${tdamp} ${BARO} ${PEND} ${PEND} ${pdamp}
+run             ${nhold}
+unfix           hold
+variable rholiq equal $(density)
+print           "### Liquid at TREL=${TREL} K, ${PEND} bar: rho ~ ${rholiq} g/cm^3"
+write_restart   liquid_0bar.restart
+write_dump      all xyz liquid_${TREL}K.xyz modify element ${ELEMENTS}
+variable TSTART equal ${TREL}
+
+# =====================================================================
+# Stage 4: continuous NPT quench to TFINAL
+# =====================================================================
+label stage4
+print """variable TSTART equal ${TSTART}
+variable THOT equal ${THOT}
+variable capped equal ${capped}
+variable P0 equal ${P0}
+variable rholiq equal ${rholiq}
+variable tmixed equal ${tmixed}""" file liquid_state.lmp screen no
+if "${SPLIT} == 1" then &
+  "print '### SPLIT=1: stopping after the liquid stage; continue with in.quench_restart (reads liquid_0bar.restart)'" &
+  "quit 0"
+variable ncool equal ceil((${TSTART}-${TFINAL})/(${RATE}*${DT}))
+if "${PQHOLD} == 1" then &
+  "variable PCEND equal ${PEND}" &
+else &
+  "variable PCEND equal 0.0"
+fix             cool all npt temp ${TSTART} ${TFINAL} ${tdamp} ${BARO} ${PEND} ${PCEND} ${pdamp}
+run             ${ncool}
+# pressure-quench option: glass formed at PEND, released to 0 bar at TFINAL
+if "${PQHOLD} == 1" then &
+  "unfix cool" &
+  "variable rhoPQ equal $(density)" &
+  "print '### quenched at ${PEND} bar: rho(TFINAL, ${PEND} bar) = ${rhoPQ} g/cm^3 -> releasing over ${TPREL} ps'" &
+  "write_data glass_${TFINAL}K_${PEND}bar.data" &
+  "fix cool all npt temp ${TFINAL} ${TFINAL} ${tdamp} ${BARO} ${PEND} 0.0 ${pdamp}" &
+  "run $(ceil(v_TPREL/v_DT))"
+unfix           cool
+write_restart   quenched.restart
+
+# =====================================================================
+# Stage 5: anneal, sampling, final relaxation
+# =====================================================================
+variable nanneal equal ceil(${TANNEAL}/${DT})
+variable nsample equal ceil(${TSAMPLE}/${DT})
+
+fix             anneal all npt temp ${TFINAL} ${TFINAL} ${tdamp} ${BARO} 0.0 0.0 ${pdamp}
+run             ${nanneal}
+unfix           anneal
+undump          traj
+
+dump            stats all custom $(v_nsample/10) md_stats.lammpstrj id type element x y z
+dump_modify     stats sort id element ${ELEMENTS}
+fix             sample all nvt temp ${TFINAL} ${TFINAL} ${tdamp}
+run             ${nsample}
+unfix           sample
+undump          stats
+
+unfix           wd
+unfix           flog
+
+fix             boxrel all box/relax ${BRELAX} 0.0
+minimize        1.0e-8 1.0e-8 10000 10000
+unfix           boxrel
+
+write_data      glass_300K.dat
+write_dump      all xyz glass_300K.xyz modify element ${ELEMENTS}
+
+run 0 post no
+variable rhoF equal $(density)
+variable peF  equal $(pe)
+print "RESULT THOT=${THOT} capped=${capped} P0=${P0} rho_liq=${rholiq} RATE=${RATE} rho300=${rhoF} PE=${peF}"
+print "THOT ${THOT} capped ${capped} P0 ${P0} rho_liq_THOT ${rholiq} RATE ${RATE} rho300 ${rhoF} PE ${peF}" file quench_summary.txt screen no

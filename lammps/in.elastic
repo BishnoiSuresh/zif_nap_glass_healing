@@ -1,0 +1,94 @@
+# =====================================================================
+# in.elastic -- static (0 K) elastic stiffness tensor C_ij by finite strain.
+#   box/relax to 0 bar (RELAX = aniso, or e.g. "y 0.0 z 0.0" to keep a crack open),
+#   then for each Voigt strain j = xx yy zz yz xz xy apply +EPS and -EPS (absolute box
+#   from the reference, atoms relaxed with CG at fixed box) and record the stress.
+#   C_ij = -(p_i(+) - p_i(-)) / (2 EPS)    (LAMMPS pressure p = -sigma; GPa)
+# Output: elastic_C.txt (6x6, GPa) -> python elastic_summary.py elastic_C.txt
+# =====================================================================
+variable DATAFILE index composite_glass.data
+variable TAG      index pristine
+variable ELEMENTS index "C H N Na O P Zn"
+variable MODEL    index model-mliap_lammps.pt
+variable TESTPOT  index 0
+variable D3       index 1
+variable D3FUNC   index r2scan
+variable EPS      index 0.005
+variable RELAX    index "aniso 0.0"
+variable ETOL     index 0.0
+variable FTOL     index 1.0e-3     # eV/A
+variable MAXIT    index 3000
+
+units           metal
+boundary        p p p
+atom_style      atomic
+atom_modify     map yes
+read_data       ${DATAFILE}
+change_box      all triclinic
+if "${TESTPOT} == 1" then &
+  "pair_style soft 2.0" &
+  "pair_coeff * * 5.0" &
+elif "${D3} == 1" &
+  "pair_style hybrid/overlay mliap unified ${MODEL} 0 d3 9000 1600 damp_bj ${D3FUNC}" &
+  "pair_coeff * * mliap ${ELEMENTS}" &
+  "pair_coeff * * d3 ${ELEMENTS}" &
+else &
+  "pair_style mliap unified ${MODEL} 0" &
+  "pair_coeff * * ${ELEMENTS}"
+neigh_modify    one 3000
+thermo          100
+thermo_style    custom step pe press pxx pyy pzz pyz pxz pxy lx ly lz
+min_style       cg
+min_modify      line quadratic
+
+fix             br all box/relax ${RELAX}
+minimize        ${ETOL} ${FTOL} ${MAXIT} 100000
+unfix           br
+minimize        ${ETOL} ${FTOL} ${MAXIT} 100000
+write_data      elastic_ref_${TAG}.data
+variable x0  equal $(xlo)
+variable x1  equal $(xhi)
+variable y0  equal $(ylo)
+variable y1  equal $(yhi)
+variable z0  equal $(zlo)
+variable z1  equal $(zhi)
+variable lx0 equal $(lx)
+variable ly0 equal $(ly)
+variable lz0 equal $(lz)
+variable p0_1 equal $(pxx)
+variable p0_2 equal $(pyy)
+variable p0_3 equal $(pzz)
+variable p0_4 equal $(pyz)
+variable p0_5 equal $(pxz)
+variable p0_6 equal $(pxy)
+print "### reference: lx ${lx0} ly ${ly0} lz ${lz0}  residual p (bar) ${p0_1} ${p0_2} ${p0_3} ${p0_4} ${p0_5} ${p0_6}"
+print "# C_ij (GPa), rows i = xx yy zz yz xz xy, columns j = applied strain" file elastic_C_${TAG}.txt screen no
+
+variable j loop 6
+label jloop
+variable s loop 2
+label sloop
+if "${s} == 1" then "variable e equal ${EPS}" else "variable e equal -${EPS}"
+# absolute deformation from the reference box (remap atoms)
+if "${j} == 1" then "change_box all x final ${x0} $(v_x0+v_lx0*(1+v_e)) yz final 0 xz final 0 xy final 0 remap units box"
+if "${j} == 2" then "change_box all x final ${x0} ${x1} y final ${y0} $(v_y0+v_ly0*(1+v_e)) z final ${z0} ${z1} yz final 0 xz final 0 xy final 0 remap units box"
+if "${j} == 3" then "change_box all x final ${x0} ${x1} y final ${y0} ${y1} z final ${z0} $(v_z0+v_lz0*(1+v_e)) yz final 0 xz final 0 xy final 0 remap units box"
+if "${j} == 4" then "change_box all x final ${x0} ${x1} y final ${y0} ${y1} z final ${z0} ${z1} yz final $(v_e*v_lz0) xz final 0 xy final 0 remap units box"
+if "${j} == 5" then "change_box all x final ${x0} ${x1} y final ${y0} ${y1} z final ${z0} ${z1} yz final 0 xz final $(v_e*v_lz0) xy final 0 remap units box"
+if "${j} == 6" then "change_box all x final ${x0} ${x1} y final ${y0} ${y1} z final ${z0} ${z1} yz final 0 xz final 0 xy final $(v_e*v_ly0) remap units box"
+minimize        ${ETOL} ${FTOL} ${MAXIT} 100000
+variable pp${s}_1 equal $(pxx)
+variable pp${s}_2 equal $(pyy)
+variable pp${s}_3 equal $(pzz)
+variable pp${s}_4 equal $(pyz)
+variable pp${s}_5 equal $(pxz)
+variable pp${s}_6 equal $(pxy)
+next s
+jump SELF sloop
+# C_ij = -(p+ - p-)/(2 eps) / 1e4  (bar -> GPa)
+print "$(-(v_pp1_1-v_pp2_1)/(2*v_EPS)/1e4) $(-(v_pp1_2-v_pp2_2)/(2*v_EPS)/1e4) $(-(v_pp1_3-v_pp2_3)/(2*v_EPS)/1e4) $(-(v_pp1_4-v_pp2_4)/(2*v_EPS)/1e4) $(-(v_pp1_5-v_pp2_5)/(2*v_EPS)/1e4) $(-(v_pp1_6-v_pp2_6)/(2*v_EPS)/1e4)" append elastic_C_${TAG}.txt screen yes
+# back to the reference box
+change_box      all x final ${x0} ${x1} y final ${y0} ${y1} z final ${z0} ${z1} yz final 0 xz final 0 xy final 0 remap units box
+next j
+jump SELF jloop
+print "### done: elastic_C_${TAG}.txt (columns = strain j, written row-wise per j -> transpose in elastic_summary.py)"

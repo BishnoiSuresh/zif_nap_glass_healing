@@ -1,0 +1,301 @@
+# =====================================================================
+# in.quench_zifnap  --  the GlassDB adaptive melt-quench (in.quench_adaptive_v5),
+#                       adapted for ZIF-62, 40NaP and ZIF-62/40NaP composites
+#
+# Same ensemble history as GlassBench:
+#   min -> adaptive NVT heating (all species diffusive) -> NVT mixing at THOT
+#   -> slow pressure release to PEND -> 0-bar hold -> NPT quench at RATE
+#   -> 300 K anneal + sampling -> box relaxation
+#
+# Changes vs GlassDB v5 (everything else identical):
+#   * TMAX is a CAP, not an abort: if the slowest species is not diffusive by
+#     TMAX, the run proceeds at TMAX (needed for ZIF: linkers decompose >1500 K).
+#   * Mixing criterion not met after MIXMAX segments -> warning + continue
+#     (set STRICT=1 for the original abort behaviour).
+#   * DT default 1 fs (H atoms). Use 0.002 for pure 40NaP to match GlassBench.
+#   * BARO = iso (bulk glasses) or aniso (layered composite).
+#   * Optional GPU-D3 (D3=1), element-labelled xyz snapshots for checking.
+#   * TESTPOT=1 runs a cheap soft potential (syntax test on any CPU LAMMPS).
+#
+# Run (1 GPU):
+#   lmp -k on g 1 -sf kk -pk kokkos newton on neigh half -in in.quench_zifnap \
+#       -var DATAFILE 40nap_s1.data -var ELEMENTS "Na O P" \
+#       -var MODEL /path/mh1_matpes_r2scan_fp32-mliap_lammps.pt -var SEED 11
+# =====================================================================
+
+variable DATAFILE index start.data
+variable ELEMENTS index "Na O P"
+variable MODEL    index model-mliap_lammps.pt
+variable TESTPOT  index 0        # 1 = cheap soft potential for syntax tests (no model needed)
+variable D3       index 0
+variable D3FUNC   index r2scan
+variable RATE     index 5
+variable T0       index 800
+variable DTUP     index 200
+variable TMAX     index 4600
+variable TRELAX   index 10
+variable TWIN     index 10
+variable MSDWIN   index 6
+variable TMIX     index 50
+variable MSDMIX   index 30
+variable MIXMAX   index 5
+variable STRICT   index 0
+variable PRELRATE index 1000
+variable TRELMIN  index 5
+variable THOLD    index 20
+variable PEND     index 0.0
+variable FRACMIN  index 0.5
+variable BARO     index iso
+variable BRELAX   index aniso    # final box/relax: aniso, or z to keep a fixed lateral box
+variable DT       index 0.001
+variable SEED     index 4928456
+variable TFINAL   index 300.0
+variable TANNEAL  index 20
+variable TSAMPLE  index 10
+variable NTYPES_OVERRIDE index 0
+variable PQHOLD   index 0        # 1 = quench at PEND (bar), release to 0 bar at TFINAL over TPREL
+variable TPREL    index 20       # ps
+variable FLOGN    index 2000     # steps between cooling_curve.dat rows (1000 at dt=2 fs = 2 ps = 10 K at 5 K/ps)
+
+units           metal
+dimension       3
+boundary        p p p
+atom_style      atomic
+atom_modify     map yes
+read_data       ${DATAFILE}
+
+if "${TESTPOT} == 1" then &
+  "pair_style soft 2.0" &
+  "pair_coeff * * 5.0" &
+elif "${D3} == 1" &
+  "pair_style hybrid/overlay mliap unified ${MODEL} 0 d3 9000 1600 damp_bj ${D3FUNC}" &
+  "pair_coeff * * mliap ${ELEMENTS}" &
+  "pair_coeff * * d3 ${ELEMENTS}" &
+else &
+  "pair_style mliap unified ${MODEL} 0" &
+  "pair_coeff * * ${ELEMENTS}"
+
+neigh_modify    one 3000
+
+timestep        ${DT}
+variable tdamp  equal 0.2      # ps
+variable pdamp  equal 2.0      # ps
+
+thermo          1000
+thermo_style    custom step temp pe etotal press vol density lx ly lz
+
+if "${NTYPES_OVERRIDE} > 0" then &
+    "variable NT equal ${NTYPES_OVERRIDE}" &
+else &
+    "variable NT equal extract_setting(ntypes)"
+
+print """### ADAPTIVE QUENCH (zifnap, from GlassDB v5) -- parameter echo
+### DATAFILE=${DATAFILE}  ELEMENTS=${ELEMENTS}  MODEL=${MODEL}  D3=${D3}
+### RATE=${RATE} K/ps  T0=${T0}  DTUP=${DTUP}  TMAX(cap)=${TMAX}
+### TRELAX=${TRELAX}  TWIN=${TWIN} ps  MSDWIN=${MSDWIN} A^2/type
+### TMIX=${TMIX} ps  MSDMIX=${MSDMIX} A^2  MIXMAX=${MIXMAX}  STRICT=${STRICT}
+### PRELRATE=${PRELRATE} bar/ps  TRELMIN=${TRELMIN} ps  THOLD=${THOLD} ps  PEND=${PEND} bar
+### FRACMIN=${FRACMIN}  BARO=${BARO}  DT=${DT} ps  SEED=${SEED}  ntypes=${NT}
+### PQHOLD=${PQHOLD} TPREL=${TPREL} ps  FLOGN=${FLOGN} steps  BRELAX=${BRELAX}"""
+
+variable t loop ${NT}
+label group_loop
+group gt${t} type ${t}
+next t
+jump SELF group_loop
+
+variable vpe   equal pe
+variable vvol  equal vol
+variable vdens equal density
+
+# =====================================================================
+# Stage 0: relax the starting configuration
+# =====================================================================
+min_style       cg
+minimize        1.0e-6 1.0e-6 10 10
+write_dump      all xyz start_min.xyz modify element ${ELEMENTS}
+
+velocity        all create ${T0} ${SEED} rot yes dist gaussian
+fix             mom all momentum 1000 linear 1 1 1
+
+# =====================================================================
+# Stage 1: adaptive heating -- slowest species diffusive, capped at TMAX
+# =====================================================================
+variable Tcur   equal ${T0}
+variable nrelax equal ceil(${TRELAX}/${DT}) - 100
+variable nwin   equal ceil(${TWIN}/${DT})
+variable capped equal 0
+
+label heat_loop
+print           "### HEAT BLOCK: T = ${Tcur} K"
+fix             heat all nvt temp ${Tcur} ${Tcur} ${tdamp}
+run             100
+run             ${nrelax}
+
+reset_timestep  0
+variable t loop ${NT}
+label msd_setup
+variable cnt equal count(gt${t})
+if "${cnt} == 0" then "jump SELF msd_setup_skip"
+compute         cmsd${t} gt${t} msd com yes
+fix             fmsd${t} all ave/time ${nwin} 1 ${nwin} c_cmsd${t}[4]
+label msd_setup_skip
+next t
+jump SELF msd_setup
+
+run             ${nwin}
+unfix           heat
+
+variable msdslow equal 1.0e20
+variable t loop ${NT}
+label msd_check
+variable cnt equal count(gt${t})
+if "${cnt} == 0" then "jump SELF msd_check_skip"
+variable mcur equal f_fmsd${t}
+print           "###   type ${t}: windowed MSD = ${mcur} A^2 / ${TWIN} ps"
+if "${mcur} < ${msdslow}" then "variable msdslow equal ${mcur}"
+unfix           fmsd${t}
+uncompute       cmsd${t}
+label msd_check_skip
+next t
+jump SELF msd_check
+
+print           "### Slowest species at ${Tcur} K: ${msdslow} A^2 (need >= ${MSDWIN})"
+if "${msdslow} >= ${MSDWIN}" then "jump SELF mixed"
+
+if "${Tcur} >= ${TMAX}" then &
+    "variable capped equal 1" &
+    "print '### WARNING: not iso-diffusive at TMAX=${TMAX} K (slowest ${msdslow} A^2) -- proceeding at the cap'" &
+    "jump SELF mixed"
+variable Tnext equal ${Tcur}+${DTUP}
+if "${Tnext} > ${TMAX}" then "variable Tnext equal ${TMAX}"
+variable Tcur equal ${Tnext}
+jump SELF heat_loop
+
+label mixed
+variable THOT equal ${Tcur}
+print           "### THOT = ${THOT} K  (capped = ${capped})"
+
+# =====================================================================
+# Stage 2: mix at THOT; check mixing; measure <P> at THOT
+# =====================================================================
+variable nmix  equal 10*ceil(${TMIX}/(${DT}*10))
+variable navgm equal floor(${nmix}/20)
+reset_timestep  0
+compute         cmix all msd com yes
+fix             fmix all ave/time ${nmix} 1 ${nmix} c_cmix[4]
+fix             fP0  all ave/time 10 ${navgm} ${nmix} c_thermo_press
+fix             melt all nvt temp ${THOT} ${THOT} ${tdamp}
+
+variable mixit equal 0
+label mix_loop
+variable mixit equal ${mixit}+1
+run             ${nmix}
+variable msdval equal $(f_fmix)
+print           "### Mixing segment ${mixit}: cumulative MSD = ${msdval} A^2 (min ${MSDMIX})"
+if "${msdval} >= ${MSDMIX}" then "jump SELF mix_done"
+if "${mixit} >= ${MIXMAX} && ${STRICT} == 1" then &
+    "print 'ERROR: MSD < ${MSDMIX} A^2 after ${MIXMAX} mixing segments at THOT=${THOT} K'" &
+    "quit 1"
+if "${mixit} >= ${MIXMAX}" then &
+    "print '### WARNING: MSD ${msdval} < ${MSDMIX} A^2 after ${MIXMAX} segments -- continuing'" &
+    "jump SELF mix_done"
+jump SELF mix_loop
+
+label mix_done
+unfix           melt
+variable P0     equal $(f_fP0)
+variable tmixed equal ${mixit}*${TMIX}
+unfix           fmix
+unfix           fP0
+uncompute       cmix
+print           "### Mixed for ${tmixed} ps at ${THOT} K: MSD = ${msdval} A^2;  <P>(THOT) = ${P0} bar"
+
+write_data      melt_${THOT}K.dat
+write_dump      all xyz melt_${THOT}K.xyz modify element ${ELEMENTS}
+write_restart   melt.restart
+
+# =====================================================================
+# Stage 3: rate-standardised decompression at THOT, with watchdog
+# =====================================================================
+variable rho0   equal $(density)
+variable rhomin equal ${FRACMIN}*${rho0}
+print           "### Decompress ${P0} -> ${PEND} bar at ${PRELRATE} bar/ps; watchdog floor rho = ${rhomin} g/cm^3"
+
+reset_timestep  0
+variable FLOGR  equal ${FLOGN}/50
+fix             flog all ave/time 50 ${FLOGR} ${FLOGN} c_thermo_temp c_thermo_press v_vpe v_vvol v_vdens file cooling_curve.dat
+fix             wd   all halt 200 v_vdens < ${rhomin} error hard message yes
+dump            traj all custom 10000 quench.lammpstrj id type element x y z
+dump_modify     traj sort id element ${ELEMENTS}
+
+variable nrel    equal ceil(abs(${P0}-${PEND})/(${PRELRATE}*${DT}))
+variable nrelmin equal ceil(${TRELMIN}/${DT})
+if "${nrel} < ${nrelmin}" then "variable nrel equal ${nrelmin}"
+
+fix             rel all npt temp ${THOT} ${THOT} ${tdamp} ${BARO} ${P0} ${PEND} ${pdamp}
+run             ${nrel}
+unfix           rel
+
+variable nhold equal ceil(${THOLD}/${DT})
+fix             hold all npt temp ${THOT} ${THOT} ${tdamp} ${BARO} ${PEND} ${PEND} ${pdamp}
+run             ${nhold}
+unfix           hold
+variable rholiq equal $(density)
+print           "### Liquid at THOT=${THOT} K, ${PEND} bar: rho ~ ${rholiq} g/cm^3"
+write_restart   liquid_0bar.restart
+
+# =====================================================================
+# Stage 4: continuous NPT quench to TFINAL
+# =====================================================================
+variable ncool equal ceil((${THOT}-${TFINAL})/(${RATE}*${DT}))
+if "${PQHOLD} == 1" then &
+  "variable PCEND equal ${PEND}" &
+else &
+  "variable PCEND equal 0.0"
+fix             cool all npt temp ${THOT} ${TFINAL} ${tdamp} ${BARO} ${PEND} ${PCEND} ${pdamp}
+run             ${ncool}
+# pressure-quench option: glass formed at PEND, released to 0 bar at TFINAL
+if "${PQHOLD} == 1" then &
+  "unfix cool" &
+  "variable rhoPQ equal $(density)" &
+  "print '### quenched at ${PEND} bar: rho(TFINAL, ${PEND} bar) = ${rhoPQ} g/cm^3 -> releasing over ${TPREL} ps'" &
+  "write_data glass_${TFINAL}K_${PEND}bar.data" &
+  "fix cool all npt temp ${TFINAL} ${TFINAL} ${tdamp} ${BARO} ${PEND} 0.0 ${pdamp}" &
+  "run $(ceil(v_TPREL/v_DT))"
+unfix           cool
+write_restart   quenched.restart
+
+# =====================================================================
+# Stage 5: anneal, sampling, final relaxation
+# =====================================================================
+variable nanneal equal ceil(${TANNEAL}/${DT})
+variable nsample equal ceil(${TSAMPLE}/${DT})
+
+fix             anneal all npt temp ${TFINAL} ${TFINAL} ${tdamp} ${BARO} 0.0 0.0 ${pdamp}
+run             ${nanneal}
+unfix           anneal
+undump          traj
+
+dump            stats all custom $(v_nsample/10) md_stats.lammpstrj id type element x y z
+dump_modify     stats sort id element ${ELEMENTS}
+fix             sample all nvt temp ${TFINAL} ${TFINAL} ${tdamp}
+run             ${nsample}
+unfix           sample
+undump          stats
+
+unfix           wd
+unfix           flog
+
+fix             boxrel all box/relax ${BRELAX} 0.0
+minimize        1.0e-8 1.0e-8 10000 10000
+unfix           boxrel
+
+write_data      glass_300K.dat
+write_dump      all xyz glass_300K.xyz modify element ${ELEMENTS}
+
+run 0 post no
+variable rhoF equal $(density)
+variable peF  equal $(pe)
+print "RESULT THOT=${THOT} capped=${capped} P0=${P0} rho_liq=${rholiq} RATE=${RATE} rho300=${rhoF} PE=${peF}"
+print "THOT ${THOT} capped ${capped} P0 ${P0} rho_liq_THOT ${rholiq} RATE ${RATE} rho300 ${rhoF} PE ${peF}" file quench_summary.txt screen no

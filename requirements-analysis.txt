@@ -1,0 +1,6 @@
+# post-processing only (post/*.py, scripts/*.py analysis); no GPU or LAMMPS needed
+numpy>=1.26
+scipy>=1.11
+matplotlib>=3.8
+ase>=3.23
+periodictable>=1.7

@@ -1,0 +1,19 @@
+# conda env used for the paper (GPU node, CUDA 13.0 build of torch).
+# For a CUDA 12 machine change the index URL to .../whl/cu126.
+#   conda env create -p $HOME/envs/mace-lammps -f environment.yml
+name: mace-lammps
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - numpy
+  - scipy
+  - matplotlib
+  - ase
+  - git
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu130
+      - torch==2.12.0
+      - mace-torch==0.3.16
+      - periodictable
