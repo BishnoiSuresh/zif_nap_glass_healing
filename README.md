@@ -12,7 +12,7 @@ The workflow:
 All MD uses LAMMPS with the MACE-MH-1 foundation potential (matpes_r2SCAN head, float64) through the ML-IAP interface on one GPU.
 
 <p align="center">
-  <img src="media/heal_T800_s1.gif" width="100" alt="Crack healing at 800 K: the 5 A interfacial crack closes and Zn-O-P bonds re-form across the interface">
+  <img src="media/heal_T800_s1.gif" width="300" alt="Crack healing at 800 K: the 5 A interfacial crack closes and Zn-O-P bonds re-form across the interface">
   <br>
   <em>Healing of the interfacial crack at 800 K (seed 1).</em>
 </p>
