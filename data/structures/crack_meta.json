@@ -1,0 +1,88 @@
+{
+ "axis": 2,
+ "gap": 5.0,
+ "plane_frac_pristine": 0.6767009338247539,
+ "plane_frac_cracked": 0.6615969545376207,
+ "L_pristine": 53.494827907795916,
+ "L_cracked": 58.494827907795916,
+ "mode": "auto",
+ "interface": 1,
+ "zif_centre_frac": 0.8288817826601974,
+ "other_plane_frac_pristine": 0.9944886651789201,
+ "other_plane_frac_cracked": 0.9949597610875847,
+ "broken": {
+  "N-Zn": 4,
+  "N-Na": 6,
+  "Na-O": 10,
+  "O-P": 5,
+  "O-Zn": 15
+ },
+ "cut_scores": {
+  "ZnOP": 15,
+  "POP": 5,
+  "ZnN": 4
+ },
+ "centred_files": {
+  "note": "positions of the crack plane (plane_frac) and of the second side-label boundary (origin_frac, the original cell boundary) as fractions of Lz in the ZIF-centred data files of data/structures; use with scripts/heal_analysis_r1.crack_plane(at, side, plane_frac, 2, origin=origin_frac)",
+  "pristine": {
+   "plane_frac": 0.346817,
+   "origin_frac": 0.670116
+  },
+  "cracked": {
+   "plane_frac": 0.319868,
+   "origin_frac": 0.658271
+  },
+  "contact": {
+   "plane_frac": 0.332967,
+   "origin_frac": 0.67137
+  },
+  "healed_T500_s1": {
+   "plane_frac": 0.341529,
+   "origin_frac": 0.679932
+  },
+  "healed_T500_s2": {
+   "plane_frac": 0.348238,
+   "origin_frac": 0.686641
+  },
+  "healed_T500_s3": {
+   "plane_frac": 0.347779,
+   "origin_frac": 0.686182
+  },
+  "healed_T600_s1": {
+   "plane_frac": 0.342679,
+   "origin_frac": 0.681082
+  },
+  "healed_T600_s2": {
+   "plane_frac": 0.345869,
+   "origin_frac": 0.684272
+  },
+  "healed_T600_s3": {
+   "plane_frac": 0.347479,
+   "origin_frac": 0.685882
+  },
+  "healed_T700_s1": {
+   "plane_frac": 0.340728,
+   "origin_frac": 0.679131
+  },
+  "healed_T700_s2": {
+   "plane_frac": 0.346936,
+   "origin_frac": 0.685339
+  },
+  "healed_T700_s3": {
+   "plane_frac": 0.345321,
+   "origin_frac": 0.683724
+  },
+  "healed_T800_s1": {
+   "plane_frac": 0.343798,
+   "origin_frac": 0.682201
+  },
+  "healed_T800_s2": {
+   "plane_frac": 0.34601,
+   "origin_frac": 0.684413
+  },
+  "healed_T800_s3": {
+   "plane_frac": 0.341832,
+   "origin_frac": 0.680235
+  }
+ }
+}
