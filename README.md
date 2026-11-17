@@ -1,4 +1,4 @@
-# ZIF-62 / 40NaP hybrid glass: crack healing by machine-learning MD
+# ZIF-62 / 40NaP hybrid glass: crack healing
 
 Simulation code for the molecular-dynamics part of the paper on self-healing ZIF-62 / phosphate (40Na₂O–60P₂O₅, "40NaP") hybrid glasses.
 
