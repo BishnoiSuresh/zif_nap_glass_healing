@@ -216,12 +216,9 @@ Section 2, and `post/` recomputes every table from them.
 ## Acknowledgements
 
 - LAMMPS: Thompson et al., *Comput. Phys. Commun.* 271, 108171 (2022).
-- MACE: Batatia et al., *NeurIPS* 2022. The MACE-MH-1 foundation model is distributed by the ACEsuit / mace-foundations project.
+- MACE: Batatia et al., *NeurIPS* 2022. The MACE-MH-1 foundation model by the mace-foundations project.
 - ML-IAP / KOKKOS interface for MACE in LAMMPS.
-- GPU-D3: SevenNet, MDIL-SNU.
-- ASE: Larsen et al., *J. Phys.: Condens. Matter* 29, 273002 (2017).
 - ZIF-62 starting structure: built from CSD deposition 2130183 (doi:10.5517/ccdc.csd.cc29hml1), bIm fraction 0.25, as a 2×2×1 supercell.
-- Melt–quench protocol (`in.quench_zifnap`): adapted from the GlassDB adaptive quench (v5).
 
 ## License
 
